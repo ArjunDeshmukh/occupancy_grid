@@ -1,8 +1,11 @@
 import numpy as np
+from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 from matplotlib.widgets import Slider, RadioButtons
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Rectangle
+from matplotlib.collections import LineCollection
 
 
 class VehicleGridVisualizer:
@@ -11,12 +14,13 @@ class VehicleGridVisualizer:
         self.L = 4.0  # Vehicle length
         self.W = 2.0  # Vehicle width
 
-        # Initial State [x, y, heading]
-        self.state = np.array([50.0, 50.0, 0.0])
-
         # Grid parameters
-        self.grid_size = 100
-        self.resolution = 0.2  # 1 meter per cell
+        self.grid_side_length_m = 40.0
+        self.resolution = 1.0
+        self.grid_size = int(self.grid_side_length_m/self.resolution)
+
+        # Initial State [x, y, heading]
+        self.state = np.array([self.grid_side_length_m/2, self.grid_side_length_m/2, 0.0])
 
         # Trajectory prediction parameters
         self.pred_time = 6.0
@@ -24,6 +28,17 @@ class VehicleGridVisualizer:
         self.dt = 0.1  # Simulation time step
 
         self.setup_plot()
+
+        self.is_paused = False
+
+    def on_key(self, event):
+        if event.key == ' ':  # Press Spacebar to toggle pause/resume
+            if self.anim.running:
+                self.anim.event_source.stop()
+                self.anim.running = False
+            else:
+                self.anim.event_source.start()
+                self.anim.running = True
 
     def setup_plot(self):
         # Setup Figure and Subplots
@@ -42,9 +57,9 @@ class VehicleGridVisualizer:
         # Sliders
         self.sl_v = Slider(self.ax_v, 'Speed', -5.0, 15.0, valinit=5.0)
         self.sl_steer = Slider(self.ax_steer, 'Steering', -0.5, 0.5, valinit=0.1)
-        self.sl_decay_s = Slider(self.ax_decay_s, 'Long. Decay', 0.01, 0.5, valinit=0.08)
-        self.sl_decay_lat = Slider(self.ax_decay_lat, 'Lat. Decay', 0.01, 1.0, valinit=0.3)
-        self.sl_thresh = Slider(self.ax_thresh, 'Threshold', 0.01, 0.99, valinit=0.6)
+        self.sl_decay_s = Slider(self.ax_decay_s, 'Long. Decay', 0.01, 0.5, valinit=0.02)
+        self.sl_decay_lat = Slider(self.ax_decay_lat, 'Lat. Decay', 0.01, 1.0, valinit=0.1)
+        self.sl_thresh = Slider(self.ax_thresh, 'Reachability Threshold', 0.01, 0.99, valinit=0.6)
 
         # Radio Buttons for Grid Mode
         self.radio = RadioButtons(self.ax_radio, ('World Fixed', 'Host Translating'))
@@ -101,6 +116,10 @@ class VehicleGridVisualizer:
         return heat_flat.reshape(X.shape)
 
     def update(self, frame):
+        if hasattr(self, 'fine_grid_lines') and self.fine_grid_lines is not None:
+            self.fine_grid_lines.remove()
+            self.fine_grid_lines = None
+
         v = self.sl_v.val
         steer = self.sl_steer.val
         thresh = self.sl_thresh.val
@@ -120,12 +139,12 @@ class VehicleGridVisualizer:
 
         # 2. Determine Grid Extents based on Mode
         if mode == 'World Fixed':
-            grid_x_min, grid_x_max = 0, 100
-            grid_y_min, grid_y_max = 0, 100
+            grid_x_min, grid_x_max = 0, self.grid_side_length_m
+            grid_y_min, grid_y_max = 0, self.grid_side_length_m
         else:
             # Translating grid (no rotation)
-            grid_x_min, grid_x_max = x - 30, x + 30
-            grid_y_min, grid_y_max = y - 30, y + 30
+            grid_x_min, grid_x_max = x - self.grid_side_length_m/2, x + self.grid_side_length_m/2
+            grid_y_min, grid_y_max = y - self.grid_side_length_m/2, y + self.grid_side_length_m/2
 
         x_lin = np.linspace(grid_x_min, grid_x_max, self.grid_size)
         y_lin = np.linspace(grid_y_min, grid_y_max, self.grid_size)
@@ -138,16 +157,50 @@ class VehicleGridVisualizer:
         # 4. Draw Everything
         self.ax.clear()
         self.ax.set_title("Vehicle Reachability Grid Prediction")
+        self.ax.xaxis.set_major_locator(MultipleLocator(self.resolution))
+        self.ax.yaxis.set_major_locator(MultipleLocator(self.resolution))
+        self.ax.set_xticklabels([])
+        self.ax.set_yticklabels([])
+
+        # Create a copy of R and mask out values that are nearly 0 (e.g., less than 0.01)
+        epsilon = 0.01
+        R_masked = np.ma.masked_where(np.abs(R) < epsilon, R)
+
+        # Configure the colormap to render masked/transparent values cleanly
+        cmap = plt.get_cmap('jet').copy()
+        cmap.set_bad(color='none')  # Makes masked values completely transparent
 
         # Plot Heatmap (Blue to Red)
-        pcm = self.ax.pcolormesh(X, Y, R, cmap='jet', vmin=0.0, vmax=1.0, shading='auto')
+        pcm = self.ax.pcolormesh(X, Y, R_masked, cmap='jet', vmin=0.0, vmax=1.0, edgecolors='red', shading='auto', linewidth=0.2)
 
         # Plot Threshold Boundary & highlight "Double Resolution" zone using hatching
         if R.min() < thresh < R.max():
             # Solid Yellow Boundary
             self.ax.contour(X, Y, R, levels=[thresh], colors='yellow', linewidths=2.5)
-            # Finer mesh/hatch pattern inside the boundary to represent "doubled resolution"
-            self.ax.contourf(X, Y, R, levels=[thresh, 1.0], colors='none', hatches=['xx'])
+            rows, cols = R.shape
+            resolution_increment_factor = int(2)
+
+            for i in range(rows-1):
+                for j in range(cols-1):
+                    if R[i, j] >= thresh:
+                        # Get the 4 corners of this cell
+                        x0, x1 = X[i, j] - self.resolution/2.0, X[i, j] + self.resolution/2.0
+                        y0, y1 = Y[i, j] - self.resolution/2.0, Y[i, j] + self.resolution/2.0
+
+                        # Create minigrid inside the cell
+                        x_mini_lin = np.linspace(x0, x1, resolution_increment_factor + 1)
+                        y_mini_lin = np.linspace(y0, y1, resolution_increment_factor + 1)
+
+                        X_mini, Y_mini = np.meshgrid(x_mini_lin, y_mini_lin)
+
+                        # Plot horizontal grid lines of the mini-grid
+                        for r in range(X_mini.shape[0]):
+                            self.ax.plot(X_mini[r, :], Y_mini[r, :], color='black', linewidth=1.0, alpha=1.0)
+
+                        # Plot vertical grid lines of the mini-grid
+                        for c in range(X_mini.shape[1]):
+                            self.ax.plot(X_mini[:, c], Y_mini[:, c], color='black', linewidth=1.0, alpha=1.0)
+
 
         # Plot Vehicle Body
         # Compute bottom-left corner from center
@@ -167,7 +220,11 @@ class VehicleGridVisualizer:
         self.ax.set_aspect('equal')
         self.ax.grid(True, color='white', alpha=0.2)
 
+        self.anim.running = True
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+
 
 if __name__ == '__main__':
     viz = VehicleGridVisualizer()
+
     plt.show()
