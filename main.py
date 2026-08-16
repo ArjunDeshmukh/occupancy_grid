@@ -2,7 +2,7 @@ import numpy as np
 from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
-from matplotlib.widgets import Slider, RadioButtons
+from matplotlib.widgets import Slider, RadioButtons, TextBox
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Rectangle
 from matplotlib.collections import LineCollection
@@ -53,6 +53,7 @@ class VehicleGridVisualizer:
         self.ax_decay_lat = self.fig.add_axes([0.15, 0.15, 0.65, 0.03], facecolor=ax_color)
         self.ax_thresh = self.fig.add_axes([0.15, 0.10, 0.65, 0.03], facecolor=ax_color)
         self.ax_radio = self.fig.add_axes([0.85, 0.10, 0.12, 0.20], facecolor=ax_color)
+        self.ax_res = self.fig.add_axes([0.15, 0.05, 0.65, 0.03], facecolor=ax_color)
 
         # Sliders
         self.sl_v = Slider(self.ax_v, 'Speed', -5.0, 15.0, valinit=5.0)
@@ -60,6 +61,8 @@ class VehicleGridVisualizer:
         self.sl_decay_s = Slider(self.ax_decay_s, 'Long. Decay', 0.01, 0.5, valinit=0.02)
         self.sl_decay_lat = Slider(self.ax_decay_lat, 'Lat. Decay', 0.01, 1.0, valinit=0.1)
         self.sl_thresh = Slider(self.ax_thresh, 'Reachability Threshold', 0.01, 0.99, valinit=0.6)
+        # Resolution increment factor for area-of-interest (enter integer)
+        self.res_text = TextBox(self.ax_res, 'Res Increment Factor', initial='2')
 
         # Radio Buttons for Grid Mode
         self.radio = RadioButtons(self.ax_radio, ('World Fixed', 'Host Translating'))
@@ -156,6 +159,19 @@ class VehicleGridVisualizer:
 
         # 4. Draw Everything
         self.ax.clear()
+        # Show pause/continue hint
+        self.ax.text(
+            0.01,
+            0.99,
+            "Space bar: pause/continue",
+            transform=self.ax.transAxes,
+            va='top',
+            ha='left',
+            color='white',
+            fontsize=10,
+            bbox=dict(facecolor='black', alpha=0.6, edgecolor='none', pad=4),
+            zorder=10,
+        )
         self.ax.set_title("Vehicle Reachability Grid Prediction")
         self.ax.xaxis.set_major_locator(MultipleLocator(self.resolution))
         self.ax.yaxis.set_major_locator(MultipleLocator(self.resolution))
@@ -178,7 +194,12 @@ class VehicleGridVisualizer:
             # Solid Yellow Boundary
             self.ax.contour(X, Y, R, levels=[thresh], colors='yellow', linewidths=2.5)
             rows, cols = R.shape
-            resolution_increment_factor = int(2)
+            try:
+                resolution_increment_factor = int(float(self.res_text.text))
+                if resolution_increment_factor < 1:
+                    resolution_increment_factor = 1
+            except Exception:
+                resolution_increment_factor = 2
 
             for i in range(rows-1):
                 for j in range(cols-1):
