@@ -1,0 +1,7 @@
+# Requirements for this project
+# Add packages below, one per line. Example:
+# requests==2.31.0
+
+numpy
+scipy
+matplotlib
